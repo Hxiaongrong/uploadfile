@@ -92,6 +92,16 @@ server.on("request", async (req, res) => {
   }
   
   if (req.url === '/upload') {
+    if(Math.random() < 0.5){
+      // 概率报错
+      console.log('概率报错了')
+      res.statusCode = 500
+      res.end(JSON.stringify({
+        code: 1,
+        message: '略略略，报错了~'
+      }))
+      return
+    }
     const multipart = new multiparty.Form()
     // 拿不到解析的fields 和 files，待解决
     multipart.parse(req, async (err, fields, files) => {
@@ -117,6 +127,7 @@ server.on("request", async (req, res) => {
           }
         }
         if (name === 'filename') {
+          console.log('filename', val)
           filename = val
           await fse.move(chunk.path, `${chunkDir}/${filename}`)
           res.end(JSON.stringify({
@@ -127,7 +138,7 @@ server.on("request", async (req, res) => {
       })
     })
   }
-
+  // 是否需要给每个chunk 提供size, 待验证
   if (req.url === '/merge') {
     const { filename:fileFullname, hash, size } = await resolvePost(req)
     const fileType = fileFullname.slice(fileFullname.lastIndexOf('.') + 1, fileFullname.length)

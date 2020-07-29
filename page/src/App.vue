@@ -109,7 +109,7 @@ export default {
 
         let cur = offset
         while (cur < size) {
-          this.percentage = parseFloat(cur / size * 100).toFixed(2)
+          this.percentage = +(parseFloat(cur / size * 100).toFixed(2))
           if (cur + offset >= size) {
             chunks.push(file.slice(cur, cur + offset))
           } else {
@@ -167,6 +167,52 @@ export default {
       }))
       await this.uploadChunks()
     },
+    async slowUpload() {
+      const file = this.container.file
+      if (!file) return
+      const fileSize = file.size
+      let offset = 1024 * 1024
+      let cur = 0
+      let count = 0
+      this.container.hash = await this.calculateHashSample()
+      this.data = []
+      const { shouldUpload } = await this.verifyUpload(
+        this.container.file.name,
+        this.container.hash
+      )
+      if (!shouldUpload) {
+        this.$message.success('秒传：上传成功')
+        return
+      }
+
+      while (cur < fileSize) {
+        const chunk = file.slice(cur, cur + offset)
+        cur += offset
+        const filename = this.container.file.name + '_' + this.container.hash + '-' + count
+        this.data.push({
+          hash: filename,
+          size: chunk.size,
+          percentage: 0
+        })
+        const form = new FormData()
+
+        form.append('chunk', chunk)
+        form.append('hash', this.container.hash)
+        form.append('filename', filename)
+        form.append('size', chunk.size)
+        const start = new Date().getTime()
+        await this.request({ url: 'http://localhost:3000/upload', data: form, onProgress: this.createProgressHandler(this.data[count]) })
+        const now = new Date().getTime()
+        const time = ((now - start) / 1000).toFixed(4)
+        let rate = time / 0.1
+        console.log(`切片${count}大小是${offset},耗时${time}秒，是0.1秒的${rate}倍，修正大小为${parseInt(offset / rate)}`)
+        if (rate < 0.5) rate = 0.5
+        if (rate > 2) rate = 2
+        offset = parseInt(offset / rate)
+        count++
+      }
+      await this.mergeRequest()
+    },
     async verifyUpload(filename, fileHash) {
       const { data } = await this.request({
         url: 'http://localhost:3000/verify',
@@ -186,7 +232,7 @@ export default {
           formData.append('chunk', chunk)
           formData.append('hash', fileHash)
           formData.append('filename', hash)
-          return { formData, index }
+          return { formData, index, status: 'wait' }
         })
         // 不能很好的处理并发
         // .map(({ formData, index }) => this.request({
@@ -200,30 +246,51 @@ export default {
       await this.mergeRequest()
     },
     async sendRequest(forms, max = 4) {
-      return new Promise(res => {
+      const retryTime = 3
+      return new Promise((res, rej) => {
         const len = forms.length
-        let idx = 0
         let counter = 0
+        const retryArr = forms.map(item => 0)
         const start = async() => {
-          while (idx < len && max > 0) {
-            max--
-            const form = forms[idx].formData
-            const index = forms[idx].index
-            idx++
-            this.request({
-              url: 'http://localhost:3000/upload',
-              data: form,
-              onProgress: this.createProgresshandler(this.chunks[index]),
-              requestList: this.requestList
-            }).then(() => {
-              max++
-              counter++
-              if (counter === len) {
-                res()
-              } else {
-                start()
-              }
+          while (counter < len && max > 0) {
+            const idx = forms.findIndex(item => {
+              return item.status === 'wait' || item.status === 'error'
             })
+            if (idx !== -1) {
+              const form = forms[idx].formData
+              const index = forms[idx].index
+              console.log('发送请求编号：' + idx + '\t状态：' + forms[idx].status)
+              max--
+              forms[idx].status = 'uploading'
+              this.request({
+                url: 'http://localhost:3000/upload',
+                data: form,
+                onProgress: this.createProgressHandler(this.data[index]),
+                requestList: this.requestList
+              }).then(() => {
+                max++
+                counter++
+                if (counter === len) {
+                  res()
+                } else {
+                  start()
+                }
+              }).catch(() => {
+                retryArr[index] += 1
+                max++
+                if (retryArr[index] > retryTime) {
+                  forms[idx].status = 'fail'
+                  this.data.percentage = -1
+                  return rej()
+                } else {
+                  forms[idx].status = 'error'
+                }
+                console.log('请求失败编号：' + idx)
+                start()
+              })
+            } else {
+              break
+            }
           }
         }
         start()
@@ -243,7 +310,7 @@ export default {
       })
     },
     request({ url, method = 'post', data, headers = {}, onProgress = e => e }) {
-      return new Promise(resolve => {
+      return new Promise((resolve, reject) => {
         const xhr = new XMLHttpRequest()
         xhr.open(method, url)
         xhr.upload.onprogress = onProgress
@@ -252,9 +319,20 @@ export default {
         )
         xhr.send(data)
         xhr.onload = e => {
-          resolve({
-            data: e.target.response
-          })
+          if (e.target.status === 200) {
+            resolve({
+              data: e.target.response
+            })
+          }
+          if (e.target.status === 500) {
+            reject({
+              data: e.target.response
+            })
+          }
+        }
+        xhr.onerror = e => {
+          console.log('onerror', e)
+          reject(e)
         }
       })
     }
